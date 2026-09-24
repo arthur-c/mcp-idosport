@@ -1,72 +1,116 @@
-# MCP IDO – Calendrier iDO Sport
+# MCP iDO Sport
 
-Serveur MCP **lecture seule** pour récupérer le calendrier et les plans d’entraînement depuis [iDO sport app](https://www.idosport.app/) (pas d’API publique).
+An unofficial, read-only MCP server for planned training sessions in
+[iDO Sport](https://www.idosport.app/). The upstream service does not provide a public API,
+so this project may need updates when its private web endpoints change.
 
-**Périmètre : séances prévues uniquement** (pas d’accès aux activités réalisées).
+The server exposes two namespaced tools:
 
-## Outils
+- `ido_get_calendar` lists planned sessions in a bounded date range.
+- `ido_get_event_plan` returns the structured plan for a calendar event.
 
-- **get_calendar** — Liste des **séances prévues** du calendrier (optionnel : `start`, `end` au format YYYY-MM-DD).
-- **get_event_plan** — Détail et plan d’une séance prévue à partir de son `event_id` (caleventId issu de `get_calendar`).
+Completed activities are not returned and no training data is modified.
 
-## Prérequis
+## Credentials
 
-- Python 3.10+
-- Compte iDO (athlète) avec accès au calendrier
+Copy the example file and fill in your own values:
 
-## Installation
-
-```bash
-cd mcp-ido
-python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+```console
+cp .env.example .env
 ```
 
-## Configuration
-
-Les identifiants ne doivent **jamais** être dans le code. Utilisez un fichier `.env` à la racine du projet (non versionné) :
-
-```env
-IDO_USERNAME=ton_email_ou_identifiant
-IDO_PASSWORD=ton_mot_de_passe
+```dotenv
+IDO_USERNAME='your-login-or-email'
+IDO_PASSWORD='your-literal-password'
 ```
 
-Ou exportez les variables d’environnement :
+Single quotes preserve spaces and characters such as `#` and `$`. Escape a literal single quote
+inside a value as `\'`. Variable interpolation is disabled when this file is loaded, so passwords
+containing `${...}` remain literal. The real `.env` file is ignored by Git and excluded from the
+container build context. Never commit it or bake credentials into an image.
 
-```bash
-export IDO_USERNAME="..."
-export IDO_PASSWORD="..."
+## Local development
+
+[uv](https://docs.astral.sh/uv/) provides the reproducible development environment:
+
+```console
+uv sync --locked --all-extras
+uv run mcp-idosport
 ```
 
-Le fichier `.env` est ignoré par git (voir `.gitignore`).
+The default transport is stdio. A local MCP client can launch the same command from this
+repository. The compatibility command `uv run python server.py` is also supported.
 
-## Lancer le serveur MCP
+Run the checks with:
 
-En mode stdio (pour Cursor / clients MCP) :
-
-```bash
-python server.py
+```console
+uv run ruff check .
+uv run ruff format --check .
+uv run pytest
 ```
 
-Le serveur communique par stdin/stdout ; un client MCP (ex. Cursor) l’exécute en sous-processus et envoie les requêtes JSON-RPC.
+## Streamable HTTP
 
-## Configuration Cursor
+Set the transport explicitly to expose the server over HTTP:
 
-Dans les paramètres MCP de Cursor, ajoutez un serveur de type “Command” (stdio) :
+```dotenv
+MCP_TRANSPORT='streamable-http'
+MCP_HOST='0.0.0.0'
+MCP_PORT='8000'
+MCP_PATH='/mcp'
+MCP_ALLOWED_HOSTS='localhost,localhost:*,127.0.0.1,127.0.0.1:*'
+```
 
-- **Command** : `python` (ou le chemin vers votre interpréteur dans le venv)
-- **Arguments** : `server.py`
-- **Cwd** : répertoire du projet `mcp-ido`
-- Les variables d’environnement peuvent être chargées depuis `.env` si Cursor lance la commande depuis ce répertoire ; sinon définissez `IDO_USERNAME` et `IDO_PASSWORD` dans la config du serveur.
+The MCP endpoint is `/mcp`. Liveness and readiness endpoints are available at `/healthz` and
+`/readyz`. `MCP_ALLOWED_HOSTS` is a comma-separated allowlist for the HTTP `Host` header; add the
+service DNS names or LAN hostname that will actually be used. `MCP_ALLOWED_ORIGINS` optionally
+accepts a comma-separated origin allowlist.
 
-## Comportement
+The server uses one authenticated session, serializes access to it, retries once after session
+expiry, and caches identical reads for 30 seconds. Set `IDO_CACHE_TTL_SECONDS` from `0` to `300`
+to change that behavior.
 
-- **Lecture seule** : le serveur ne fait que des requêtes GET (et POST de login + POST de requêtes “lecture” comme load-events et show-event-modal). Aucune création, modification ou suppression de données côté iDO.
-- **Cookies** : après le login, la session (PHPSESSID, REMEMBERME) est réutilisée pour les appels suivants.
+## Container
 
-## Dépannage
+Build and run the production image locally:
 
-- **Login failed** : vérifiez `IDO_USERNAME` / `IDO_PASSWORD` et que le compte a bien accès à l’espace athlète sur www.idosport.app/athlete/.
-- **Champs du formulaire** : si le site utilise d’autres noms de champs (ex. `email` au lieu de `_username`), modifiez `ido_client.py` dans la méthode `login()`.
-- **Calendrier renvoie des activités réalisées** : le client envoie `type=planned` dans le body de load-events pour demander les séances prévues. Si l’API utilise un autre paramètre (ex. `view`, `calendarType`), adaptez `get_events(planned_only=True)` dans `ido_client.py` avec le payload observé dans DevTools (vue « séances prévues »).
+```console
+docker build -t mcp-idosport:local .
+export IDO_USERNAME='your-login-or-email'
+export IDO_PASSWORD='your-literal-password'
+docker run --rm -e IDO_USERNAME -e IDO_PASSWORD -p 8000:8000 mcp-idosport:local
+```
+
+The default container command enables Streamable HTTP on port 8000. The image runs as an
+unprivileged user and includes a health check. Avoid passing the quoted development `.env` file
+to Docker's `--env-file` option because Docker preserves those quote characters.
+
+Images produced from the default branch and version tags are published to
+`ghcr.io/arthur-c/mcp-idosport`. Version tags use the form `v1.2.3`.
+
+## Configuration reference
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `IDO_USERNAME` | required | iDO Sport login or email |
+| `IDO_PASSWORD` | required | iDO Sport password |
+| `IDO_CACHE_TTL_SECONDS` | `30` | Read cache lifetime, from 0 to 300 seconds |
+| `MCP_TRANSPORT` | `stdio` | `stdio` or `streamable-http` |
+| `MCP_HOST` | `127.0.0.1` | HTTP bind address |
+| `MCP_PORT` | `8000` | HTTP port |
+| `MCP_PATH` | `/mcp` | MCP HTTP path |
+| `MCP_ALLOWED_HOSTS` | local hosts | Accepted HTTP host headers |
+| `MCP_ALLOWED_ORIGINS` | empty | Accepted browser origins, comma-separated |
+| `LOG_LEVEL` | `INFO` | Python logging level |
+
+## Security notes
+
+- Authentication follows only HTTPS form actions on `www.idosport.app`; credentials are never
+  posted to a different origin.
+- Inputs, response sizes, date spans, result counts, and HTTP request bodies are bounded.
+- Tool errors contain actionable messages but do not expose credentials or upstream response
+  bodies.
+- HTTP mode enables MCP DNS-rebinding protection. Keep the host allowlist narrow.
+
+For an orchestrated deployment, inject the two credential values from a secret provider rather
+than mounting a repository `.env` file.
